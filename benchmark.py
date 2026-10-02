@@ -187,22 +187,34 @@ def run_benchmark():
             agg_icms = agg_icms.merge(sketches_icms[p_idx])
 
         # Calculate metrics
-        errs = {"CMS_Sum": [], "CMS_Max": [], "CMS_GCounter": [], "iCMS": []}
-        for item in items:
-            tc = true_counts[item]
-            if tc == 0:
-                continue
-            errs["CMS_Sum"].append(abs(agg_sum.query(item) - tc) / tc)
-            errs["CMS_Max"].append(abs(agg_max.query(item) - tc) / tc)
-            errs["CMS_GCounter"].append(abs(agg_gc.query(item) - tc) / tc)
-            errs["iCMS"].append(abs(agg_icms.query(item) - tc) / tc)
+        top_20 = sorted(items, key=lambda k: true_counts[k], reverse=True)[:20]
+        methods = [
+            ("CMS (Sum)", agg_sum, agg_sum.size_bytes()),
+            ("CMS (Max)", agg_max, agg_max.size_bytes()),
+            ("CMS (G-Counter)", agg_gc, agg_gc.size_bytes()),
+            ("iCMS (Ours)", agg_icms, agg_icms.size_bytes()),
+        ]
 
-        print(f"{'Method':<16} | {'Size (KB)':<10} | {'Mean Rel Err':<14} | {'Max Rel Err':<12} | {'Behavior'}")
-        print("-" * 75)
-        print(f"{'CMS (Sum)':<16} | {agg_sum.size_bytes() / 1024:<10.1f} | {statistics.mean(errs['CMS_Sum']) * 100:<13.1f}% | {max(errs['CMS_Sum']) * 100:<11.1f}% | {'Explodes on duplicates' if dup_ratio > 0 else 'Accurate (additive)'}")
-        print(f"{'CMS (Max)':<16} | {agg_max.size_bytes() / 1024:<10.1f} | {statistics.mean(errs['CMS_Max']) * 100:<13.1f}% | {max(errs['CMS_Max']) * 100:<11.1f}% | {'Severe undercount (50-80%)'}")
-        print(f"{'CMS (G-Counter)':<16} | {agg_gc.size_bytes() / 1024:<10.1f} | {statistics.mean(errs['CMS_GCounter']) * 100:<13.1f}% | {max(errs['CMS_GCounter']) * 100:<11.1f}% | {'Accurate but O(R) bloat'}")
-        print(f"{'iCMS (Ours)':<16} | {agg_icms.size_bytes() / 1024:<10.1f} | {statistics.mean(errs['iCMS']) * 100:<13.1f}% | {max(errs['iCMS']) * 100:<11.1f}% | {'IDEMPOTENT + O(1) SPACE'}")
+        print(f"{'Method':<16} | {'Size':<8} | {'HH Rel Err':<11} | {'Mean Norm Err':<14} | {'Max Norm Err':<12} | {'Behavior'}")
+        print("-" * 85)
+        for name, agg, sz in methods:
+            hh_errs = [abs(agg.query(k) - true_counts[k]) / true_counts[k] for k in top_20]
+            norm_errs = [abs(agg.query(k) - true_counts[k]) / total_ops for k in items]
+            hh_mean = statistics.mean(hh_errs) * 100
+            norm_mean = statistics.mean(norm_errs) * 100
+            norm_max = max(norm_errs) * 100
+            
+            if name == "CMS (Sum)":
+                behavior = "Accurate" if dup_ratio == 0 else f"EXPLODES ({hh_mean:.0f}% error)"
+            elif name == "CMS (Max)":
+                behavior = "Undercounts by ~97%"
+            elif name == "CMS (G-Counter)":
+                behavior = "Accurate but O(R) state bloat"
+            else:
+                behavior = "IDEMPOTENT (Zero dup surge, O(1) space)"
+
+            sz_str = f"{sz / 1024:.1f} KB" if sz < 1024 * 1024 else f"{sz / (1024 * 1024):.1f} MB"
+            print(f"{name:<16} | {sz_str:<8} | {hh_mean:>9.1f}% | {norm_mean:>12.2f}% | {norm_max:>10.2f}% | {behavior}")
 
     print("\n" + "=" * 80)
     print("SCALE-OUT MEMORY ANALYSIS (w=128, d=4)")

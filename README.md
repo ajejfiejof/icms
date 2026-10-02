@@ -44,12 +44,12 @@ Streaming sketches such as the classic **Count-Min Sketch (CMS)** (Cormode & Mut
 
 ### 1. Robustness Under Network Duplicate Storms (50 Nodes, 50,000 Operations)
 
-| Architecture | Memory | Clean (0% Dup) | Gossip (50% Dup) | Storm (200% Dup) | Behavior |
-| :--- | :---: | :---: | :---: | :---: | :--- |
-| **CMS (Additive Sum)** | 2.0 KB | 5.2% | **57.9%** | **215.0%** | Explodes on retries |
-| **CMS (Scalar Max)** | 2.0 KB | 95.0% | 95.0% | 95.0% | Severe undercounting |
-| **CMS (G-Counter Vector)** | 100.0 KB | 5.2% | 5.2% | 5.2% | O(R) memory explosion |
-| **iCMS (Ours, p=4)** | **8.0 KB** | **22.2%** | **22.2%** | **22.2%** | **ROCK SOLID / INVARIANT** |
+| Architecture | Memory | Clean (0% Dup) | Gossip (50% Dup) | Storm (200% Dup) | Canonical PAC Norm Err | Behavior |
+| :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| **CMS (Additive Sum)** | 2.0 KB | 1.2% | **52.1%** | **203.4%** | 0.01% -> 2.03% (Max: 46.7%) | Explodes on retries |
+| **CMS (Scalar Max)** | 2.0 KB | 96.9% | 96.9% | 96.9% | ~1.0% (Max: 22.9%) | Severe undercounting (~97%) |
+| **CMS (G-Counter Vector)** | 100.0 KB | 1.2% | 1.2% | 1.2% | 0.01% (Invariant) | O(R) state explosion |
+| **iCMS (Ours, p=4)** | **8.0 KB** | **22.1%** | **22.1%** | **22.1%** | **0.34% (PAC Bounded)** | **ROCK SOLID / INVARIANT** |
 
 ### 2. Fleet Scale-Out Memory Advantage (w=128, d=4)
 
@@ -79,10 +79,12 @@ Merging two sketches `M_A` and `M_B` across nodes is the element-wise register m
 M_AB[r][c] = max(M_A[r][c], M_B[r][c])
 ```
 
-### 3. Frequency Query
-The global frequency estimate is the minimum cardinality estimate across all hash rows:
+### 3. Frequency Query (Count-Mean-Min with Debiased Median)
+To eliminate negative Jensen bias from stochastic register estimation and background hash collision noise, iCMS implements debiased median estimation:
 ```
-f_hat(x) = min_{0 <= r < d} count(M[r][hash_r(x)])
+mu_r = max(0, (RowTotal_r - N_rc) / (w - 1))
+f_debiased_r = max(0, N_rc - mu_r)
+f_hat(x) = median(f_debiased_0, ..., f_debiased_{d-1})
 ```
 
 Because register arrays estimate the cardinality of the distinct event set:

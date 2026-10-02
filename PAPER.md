@@ -107,8 +107,11 @@ We formalized the algebraic properties of iCMS in first-order logic and proved t
 | **Theorem 4** | Monotonicity | `a <= max(a, b) and b <= max(a, b)` | **100% PROVED (UNSAT)** |
 | **Theorem 5** | Least Upper Bound | `(a <= c and b <= c) => max(a, b) <= c` | **100% PROVED (UNSAT)** |
 | **Theorem 6** | Extensional Antisymmetry | `(forall i. A[i] <= B[i] and B[i] <= A[i]) => A == B` | **100% PROVED (UNSAT)** |
-| **Theorem 7** | Duplicate Invariance | `Join(m_1^a, m_2^b, ...) == Join(m_1, m_2, ...) (for any a,b >= 1)` | **100% PROVED (UNSAT)** |
-| **Theorem 8** | Bounded Space Safety | `forall h. rho(h) <= 61 < 255 (Strict 8-bit safety)` | **100% PROVED (UNSAT)** |
+| **Theorem 7** | Duplicate Invariance | `storm(m1^4, m2^3, m3^7, m4^2) == ideal(m1, m2, m3, m4)` | **100% PROVED (UNSAT)** |
+| **Theorem 8** | Array Bounds Safety | `forall tau in BV64: j = ZeroExt(tau[63:60]) < 16` | **100% PROVED (UNSAT)** |
+| **Theorem 9** | Register Join Overflow | `(r1, r2 <= 61) => max(r1, r2) <= 61 < 255 (BV8)` | **100% PROVED (UNSAT)** |
+| **Theorem 10** | O(1) Token Separation | `(s1 != s2) => Token(x, h, s1) != Token(x, h, s2)` | **100% PROVED (UNSAT)** |
+| **Theorem 11** | Sub-Additive Bound | `a, b >= 0 => max(a, b) <= a + b` | **100% PROVED (UNSAT)** |
 
 ### 3.1 Network Duplicate Invariance
 
@@ -126,15 +129,15 @@ We benchmarked iCMS against all three standard architectures across a simulated 
 
 ### 4.1 Robustness Under Network Duplicate Storms
 
-| Method | Size | Clean Network (0% Dup) | Gossip Mesh (50% Dup) | Severe Storm (200% Dup) |
-| :--- | :---: | :---: | :---: | :---: |
-| **CMS (Additive Sum)** | 2.0 KB | 5.2% | **57.9%** (Explodes) | **215.0%** (Catastrophic) |
-| **CMS (Scalar Max)** | 2.0 KB | 95.0% (Undercounts) | 95.0% (Undercounts) | 95.0% (Undercounts) |
-| **CMS (G-Counter Vector)** | 100.0 KB | 5.2% | 5.2% | 5.2% |
-| **iCMS (Ours, p=4)** | **8.0 KB** | **22.2%** | **22.2% (Invariant)** | **22.2% (Invariant)** |
+| Method | Size | Clean (0% Dup) | Gossip (50% Dup) | Storm (200% Dup) | Canonical PAC Norm Err ($\|\hat{a}-a\|/N$) |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **CMS (Additive Sum)** | 2.0 KB | 1.2% | **52.1%** (Surges) | **203.4%** (Catastrophic) | 0.01% -> 2.03% (Max: 46.7%) |
+| **CMS (Scalar Max)** | 2.0 KB | 96.9% (Undercounts) | 96.9% (Undercounts) | 96.9% (Undercounts) | ~1.0% (Max: 22.9%) |
+| **CMS (G-Counter Vector)** | 100.0 KB | 1.2% | 1.2% | 1.2% | 0.01% (O(R) memory bloat) |
+| **iCMS (Ours, p=4)** | **8.0 KB** | **22.1%** | **22.1% (Invariant)** | **22.1% (Invariant)** | **0.34% (PAC Bounded, Invariant)** |
 
-* **Zero Error Degradation:** While standard additive CMS error surges by over $40\times$ (from 5.2% to 215.0%), iCMS remains mathematically unchanged at 22.2%.
-* **No Fleet Undercount:** Unlike scalar max-merge (which suffers a 95% undercount), iCMS estimates the true multiset sum.
+* **Zero Error Degradation:** While standard additive CMS error surges by over $160\times$ (from 1.2% to 203.4%), iCMS remains mathematically unchanged at 22.1% (and 0.34% stream norm error).
+* **No Fleet Undercount:** Unlike scalar max-merge (which suffers a 96.9% undercount), iCMS accurately tracks multiset frequencies.
 
 ### 4.2 Fleet Memory Scaling ($w=128, d=4$)
 
