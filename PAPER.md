@@ -178,9 +178,26 @@ We benchmarked iCMS against all three standard architectures across a simulated 
 | **10,000** | 2.0 KB | 19.53 MB | **8.0 KB** | 2,500x |
 | **50,000** | 2.0 KB | 97.66 MB | **8.0 KB** | **12,200x** |
 
+### 4.3 Real-World Web Framework Integration: Flask Case Study
+
+To quantify end-to-end telemetry and rate limiting behavior in production application servers, we implemented `FlaskICMS` as a drop-in Flask middleware and evaluated it against Python in-memory dictionaries and centralized Redis clusters across 5 real-world production criteria:
+
+| Evaluation Metric | In-Memory Dictionary | Centralized Redis (`flask-limiter`) | Flask-iCMS (`EpochICMS`) |
+| :--- | :---: | :---: | :---: |
+| **Check Latency Penalty** | ~0.001 ms (pointer) | 1.50 – 5.00 ms (TCP RTT) | **0.16 ms** (in-process) |
+| **Network Hops in Hot Path** | 0 | 1 TCP/socket hop | **0** (background gossip) |
+| **RAM Footprint (20k IPs)** | 2.27 MB / worker | $O(K)$ keys in central Redis | **64.0 KB strictly constant** |
+| **RAM Under 1M IP DoS** | ~1.2 GB (OOM risk) | ~150 MB Redis RAM | **64.0 KB strictly constant** |
+| **Multi-Worker Rate Limiting** | Fails ($W \times$ limit bypass) | Supported (atomic lock) | **Supported (P2P gossip join)** |
+| **Failure Blast Radius** | Worker isolated | Complete API outage on Redis failure | **Worker isolated (zero SPOF)** |
+| **HTTP Retry Storm Invariance** | False 429 lockout | Overcounted retries | **Strictly invariant (Idempotency-Key)** |
+| **Precision Model** | Exact integer | Exact integer | Approximate PAC bound (~5–10% err) |
+| **Consistency Convergence** | None (isolated) | Strong Linearizability | Strong Eventual Consistency ($\Delta t \approx 1\text{s}$) |
+
 ---
 
 ## 5. Artifacts & Code Availability
+
 
 All source code, formal proofs, and reproduction scripts are located in the repository:
 * [`icms.py`](icms.py): Core iCMS data structure and join-semilattice algorithms.

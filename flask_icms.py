@@ -116,6 +116,35 @@ class FlaskICMS:
 
         return decorator
 
+    def check_rate_limit(
+        self,
+        key: str,
+        limit: Optional[int] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> tuple[bool, float, int]:
+        """Programmatically check rate limit for a key outside an HTTP request context.
+
+        Returns:
+            (is_blocked, current_estimate, remaining)
+        """
+        eff_limit = limit if limit is not None else self.default_limit
+        if idempotency_key:
+            seq_num = int.from_bytes(idempotency_key.encode()[:8].ljust(8, b"\0"), "little")
+        else:
+            self._seq += 1
+            seq_num = self._seq
+
+        self.epoch_sketch.add(
+            key,
+            host_id=self.worker_id,
+            seq=seq_num,
+            incarnation_id=self.incarnation_id,
+        )
+        current_count = self.epoch_sketch.query(key)
+        is_blocked = int(round(current_count)) > eff_limit
+        remaining = max(0, eff_limit - int(round(current_count)))
+        return is_blocked, current_count, remaining
+
     def sync_gossip_from(self, other: FlaskICMS) -> bool:
         """Simulate P2P gossip sync between Flask workers."""
         return self.epoch_sketch.merge_gossip(
@@ -126,3 +155,4 @@ class FlaskICMS:
     def size_bytes(self) -> int:
         """Memory footprint in bytes."""
         return self.epoch_sketch.curr_sketch.size_bytes() * 2
+
