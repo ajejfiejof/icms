@@ -321,13 +321,20 @@ if __name__ == "__main__":
     z3_ok = run_z3_proofs()
     conc_ok = run_concrete_proofs()
 
+    # Part 3: 3rd-Party Production Software Validation (Flask)
     print("\n" + "=" * 80)
-    if z3_ok and conc_ok:
-        print("MASTER VERDICT: 100% FORMALLY PROVED & EMPIRICALLY VERIFIED")
+    print("PART 3: 3RD-PARTY PRODUCTION SOFTWARE VALIDATION (Flask Web Framework)")
+    print("=" * 80)
+    from test_flask_integration import run_tests as run_flask_tests
+    flask_ok = run_flask_tests()
+
+    print("\n" + "=" * 80)
+    if z3_ok and conc_ok and flask_ok:
+        print("MASTER VERDICT: 100% FORMALLY PROVED, EMPIRICALLY VERIFIED, & 3RD-PARTY INTEGRATED")
         print("Idempotent Count-Min Lattice (iCMS) is mathematically irrefutable.")
     else:
         print("MASTER VERDICT: PROOF FAILED")
     print(f"Total verification time: {time.time() - t0:.2f}s")
     print("=" * 80)
 
-    sys.exit(0 if (z3_ok and conc_ok) else 1)
+    sys.exit(0 if (z3_ok and conc_ok and flask_ok) else 1)

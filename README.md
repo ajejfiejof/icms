@@ -12,15 +12,34 @@
 
 Streaming sketches such as the classic **Count-Min Sketch (CMS)** (Cormode & Muthukrishnan, 2005) are fundamental for real-time frequency estimation, heavy-hitter tracking, and rate limiting. However, in distributed systems and gossip networks, engineers face the **Distributed Telemetry Trilemma**:
 
+```text
+                          ACCURATE FREQUENCY
+                            (Multiset Sum)
+                                  ▲
+                                 / \
+                                /   \
+                               /     \
+                              /   ★   \
+                             /  iCMS   \
+                            /___________\
+                           ◄             ►
+               IDEMPOTENT                   BOUNDED MEMORY
+         (Zero Double-Counting)           (O(1) Host Space)
 ```
-                       ACCURATE FREQUENCY
-                        (Multiset Sum)
-                             /  \
-                            /    \
-                           /      \
-             IDEMPOTENT  /________\  BOUNDED MEMORY
-             (No double-             (O(1) space,
-              counting)              independent of replicas R)
+
+```mermaid
+flowchart TD
+    AF["ACCURATE FREQUENCY<br/>(Multiset Sum)"]
+    ID["IDEMPOTENCY<br/>(Duplicate & Storm Invariance)"]
+    BM["BOUNDED MEMORY<br/>(O(1) Space Independent of R)"]
+
+    AF --- ID
+    ID --- BM
+    BM --- AF
+
+    style AF fill:#1e293b,stroke:#10b981,stroke-width:2px,color:#f8fafc
+    style ID fill:#1e293b,stroke:#3b82f6,stroke-width:2px,color:#f8fafc
+    style BM fill:#1e293b,stroke:#f59e0b,stroke-width:2px,color:#f8fafc
 ```
 
 1. **Additive CMS:** Accurate in fixed memory, but **non-idempotent** (`x + x != x`). Any duplicate packet or network retry storm causes counts to explode by **200%–600%**.
@@ -153,6 +172,11 @@ python benchmark.py
 ### 4. Real-World Open WebUI Integration Demonstration
 ```bash
 python open_webui_integration.py
+```
+
+### 5. 3rd-Party Production Software Integration (Flask)
+```bash
+python test_flask_integration.py
 ```
 
 ---

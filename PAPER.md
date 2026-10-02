@@ -13,15 +13,34 @@ In modern cloud computing, kernel audit streams (syscalls, network flows, micros
 
 However, distributed aggregation requires combining sketches over lossy, peer-to-peer, or gossip networks. This introduces the **Distributed Telemetry Trilemma**:
 
+```text
+                          ACCURATE FREQUENCY
+                            (Multiset Sum)
+                                  ▲
+                                 / \
+                                /   \
+                               /     \
+                              /   ★   \
+                             /  iCMS   \
+                            /___________\
+                           ◄             ►
+               IDEMPOTENT                   BOUNDED MEMORY
+         (Zero Double-Counting)           (O(1) Host Space)
 ```
-                       ACCURATE FREQUENCY
-                        (Multiset Sum)
-                             /  \
-                            /    \
-                           /      \
-             IDEMPOTENT  /________\  BOUNDED MEMORY
-             (No double-             (O(1) space,
-              counting)              independent of replicas R)
+
+```mermaid
+flowchart TD
+    AF["ACCURATE FREQUENCY<br/>(Multiset Sum)"]
+    ID["IDEMPOTENCY<br/>(Duplicate & Storm Invariance)"]
+    BM["BOUNDED MEMORY<br/>(O(1) Space Independent of R)"]
+
+    AF --- ID
+    ID --- BM
+    BM --- AF
+
+    style AF fill:#1e293b,stroke:#10b981,stroke-width:2px,color:#f8fafc
+    style ID fill:#1e293b,stroke:#3b82f6,stroke-width:2px,color:#f8fafc
+    style BM fill:#1e293b,stroke:#f59e0b,stroke-width:2px,color:#f8fafc
 ```
 
 1. **Tradeoff A (Additive CMS):** Provides accurate frequency estimation in bounded memory `O(w * d)`, but is **non-idempotent** (`x + x != x`). Any duplicate message, retry storm, or cyclic gossip delivery duplicates counters.
@@ -166,9 +185,11 @@ We benchmarked iCMS against all three standard architectures across a simulated 
 All source code, formal proofs, and reproduction scripts are located in the repository:
 * [`icms.py`](icms.py): Core iCMS data structure and join-semilattice algorithms.
 * [`verify_icms.py`](verify_icms.py): Formal Z3 SMT proofs of all 8 algebraic theorems.
-* [`prove_100.py`](prove_100.py): Master 100% formal and empirical proof suite.
+* [`prove_100.py`](prove_100.py): Master 100% formal, empirical, and 3rd-party proof suite.
 * [`benchmark.py`](benchmark.py): Distributed gossip network and scale-out memory evaluation.
 * [`open_webui_integration.py`](open_webui_integration.py): Production drop-in rate limiter integration.
+* [`flask_icms.py`](flask_icms.py): Production Flask extension for decentralized rate limiting.
+* [`test_flask_integration.py`](test_flask_integration.py): Live HTTP verification on Flask web framework.
 
 ---
 
