@@ -133,29 +133,36 @@ class ICMS:
         host_id: int = 0,
         seq: int = 0,
         incarnation_id: int = 0,
+        idempotency_key: Optional[Union[str, bytes]] = None,
     ) -> None:
-        """Add an event occurrence at a specific host, incarnation, and sequence nonce.
+        """Add an event occurrence.
 
-        CRASH-RECOVERY & IDEMPOTENCE INVARIANT:
-        - `incarnation_id`: 64-bit boot/instance nonce (e.g. system boot_id or startup timestamp).
-          Prevents silent data loss across node restarts when sequence numbers reset.
-        - `seq`: Single monotonic sequence or client request_id on this host incarnation.
-          Reused across network retransmissions and client retries for strict idempotence.
-        - Host memory overhead: Exactly 16 bytes (incarnation_id + seq), strictly O(1) space!
+        IDEMPOTENCY & CRASH-RECOVERY PROTOCOL:
+        1. Client-Idempotent Event (`idempotency_key` is provided):
+           Token is globally deterministic: Blake2b(item || b":idemp:" || idempotency_key).
+           Does NOT include host_id or incarnation_id. If a client retries across multiple
+           distinct worker nodes in a cluster, all workers compute the EXACT SAME token,
+           guaranteeing cross-worker duplicate immunity upon gossip merge!
+        2. Host-Sequenced Event (`idempotency_key` is None):
+           Token is node-scoped: Blake2b(item || b":seq:" || host_id || incarnation_id || seq).
+           Host incarnation nonce prevents collisions across node restarts when seq resets to 0.
         """
         if isinstance(item, str):
             item = item.encode("utf-8")
 
-        # Deterministic event token: Blake2b(item || host_id || incarnation_id || seq)
-        token_data = (
-            item
-            + b":"
-            + host_id.to_bytes(4, "little")
-            + b":"
-            + incarnation_id.to_bytes(8, "little")
-            + b":"
-            + seq.to_bytes(8, "little")
-        )
+        if idempotency_key is not None:
+            idemp_bytes = idempotency_key if isinstance(idempotency_key, bytes) else idempotency_key.encode("utf-8")
+            token_data = item + b":idemp:" + idemp_bytes
+        else:
+            token_data = (
+                item
+                + b":seq:"
+                + host_id.to_bytes(4, "little")
+                + b":"
+                + incarnation_id.to_bytes(8, "little")
+                + b":"
+                + seq.to_bytes(8, "little")
+            )
         token_hash = _blake2b_64(token_data, 0x1337BEEF)
 
         for r in range(self.d):
@@ -171,14 +178,16 @@ class ICMS:
                 out.cells[r][c] = self.cells[r][c].merge(other.cells[r][c])
         return out
 
-    def query(self, item: Union[str, bytes], method: str = "debiased") -> float:
+    def query(self, item: Union[str, bytes], method: str = "min") -> float:
         """Query estimated global multiset frequency of the item.
 
         Methods:
-        - 'debiased' (default): Uses Count-Mean-Min debiasing + Median to eliminate
-          negative Jensen bias and hash collision noise without sampling bias.
-        - 'min': Traditional Count-Min minimum across rows.
-        - 'median': Pure median across rows (robust to collisions).
+        - 'min' (default, canonical CMS): Minimum across rows. Since hash collisions
+          only add non-negative noise (X_r >= a_x), min is the tightest upper bound.
+          Guarantees zero wiped-out keys (0% zeros) and strictly O(d) query latency.
+        - 'median': Median across rows (alternative robust estimator).
+        - 'debiased': Count-Mean-Min estimator with median. (Note: for tail items with
+          true count below row average noise, debiased may clamp to 0).
         """
         if isinstance(item, str):
             item = item.encode("utf-8")
@@ -191,8 +200,6 @@ class ICMS:
             return statistics.median(estimates)
 
         # Debiased Estimator (Count-Mean-Min with Median):
-        # Subtract expected collision noise per row: mu_r = (Total_r - N_rc) / (w - 1)
-        # Uses exact un-sampled sum across all w buckets (O(1) via cached cell counts).
         debiased = []
         for r in range(self.d):
             c_target = self._bucket(item, r)
@@ -201,8 +208,8 @@ class ICMS:
             noise = max(0.0, (row_sum - n_target) / max(1, self.w - 1))
             debiased.append(max(0.0, n_target - noise))
 
-        # Take median of debiased estimates to eliminate extreme collision rows
         return statistics.median(debiased) if debiased else min(estimates)
+
 
     def size_bytes(self) -> int:
         """Total memory consumed by the sketch in bytes."""
@@ -258,11 +265,24 @@ class EpochICMS:
             self.next_sketch = None
             self.current_epoch = now_epoch
 
-    def add(self, item: str, host_id: int = 0, seq: int = 0, incarnation_id: int = 0) -> None:
+    def add(
+        self,
+        item: str,
+        host_id: int = 0,
+        seq: int = 0,
+        incarnation_id: int = 0,
+        idempotency_key: Optional[Union[str, bytes]] = None,
+    ) -> None:
         self._advance_epoch_if_needed()
-        self.curr_sketch.add(item, host_id=host_id, seq=seq, incarnation_id=incarnation_id)
+        self.curr_sketch.add(
+            item,
+            host_id=host_id,
+            seq=seq,
+            incarnation_id=incarnation_id,
+            idempotency_key=idempotency_key,
+        )
 
-    def query(self, item: str) -> float:
+    def query(self, item: str, method: str = "min") -> float:
         self._advance_epoch_if_needed()
         # Weighted sliding-window estimate
         now = time.time()
@@ -270,9 +290,10 @@ class EpochICMS:
         weight_curr = time_into_window / self.window
         weight_prev = 1.0 - weight_curr
 
-        c_curr = self.curr_sketch.query(item)
-        c_prev = self.prev_sketch.query(item)
+        c_curr = self.curr_sketch.query(item, method=method)
+        c_prev = self.prev_sketch.query(item, method=method)
         return c_curr + c_prev * weight_prev
+
 
     def merge_gossip(self, incoming_sketch: ICMS, incoming_epoch: int) -> bool:
         """Merge incoming gossip payload with strict epoch bounds.

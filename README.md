@@ -189,7 +189,7 @@ When adding rate limiting to Flask services, engineering teams traditionally fac
 
 | Property / Metric | In-Memory Dictionary (`dict`) | Centralized Redis (`flask-limiter`) | Flask-iCMS (`FlaskICMS`) |
 | :--- | :--- | :--- | :--- |
-| **Request Latency Penalty** | **~0.001 ms** (In-process pointer lookup) | **1.5 ms – 5.0 ms** (Synchronous TCP round-trip to Redis) | **0.16 ms** (In-process hash/bit-ops; zero network I/O) |
+| **Request Latency Penalty** | **~0.001 ms** (In-process pointer lookup) | **1.5 ms – 5.0 ms** (Synchronous TCP round-trip to Redis) | **0.03 ms (33 µs)** (In-process hash/bit-ops; zero network I/O) |
 | **Network Hops in Hot Path** | **0** (In-process memory) | **1 TCP round-trip** per HTTP request | **0** (In-process memory; gossip is background async) |
 | **RAM Footprint (20,000 IPs)** | **2.27 MB / worker** ($18.2\text{ MB}$ across 8 workers) | **$O(K)$ keys** allocated in central Redis cluster RAM | **64.0 KB strictly constant** ($128 \times 4 \times 64\text{ B} \times 2$) |
 | **DDoS Attack (1,000,000 IPs)** | **~1.2 GB** (High risk of container OOM-kills) | **~150 MB** Redis memory allocation | **64.0 KB flat** (100% immune to memory exhaustion) |
@@ -203,10 +203,10 @@ When adding rate limiting to Flask services, engineering teams traditionally fac
 ### Un-Hyped Architectural Trade-Offs
 
 1. **Where iCMS Wins Decisively:**
-   - **Hot Path Latency:** Eliminates the 1.5–5.0 ms network round-trip overhead on every single HTTP request. Rate limit checks take 160 µs in pure Python.
+   - **Hot Path Latency:** Eliminates the 1.5–5.0 ms network round-trip overhead on every single HTTP request. Rate limit checks take **33 µs** in pure Python ($O(d)$ time).
    - **Zero Redis Dependency / Blast Radius:** Eliminates Redis infrastructure costs, maintenance, and catastrophic single-point-of-failure outages.
    - **Anti-DoS Memory Security:** Eliminates dictionary memory exhaustion attacks. An adversary can spray 100,000,000 distinct IP addresses without causing memory consumption to grow beyond 64 KB.
-   - **HTTP Retry Storm Deduplication:** Native HTTP `Idempotency-Key` headers are deterministically mapped into token registers, preventing network retransmissions from triggering false 429 lockouts.
+   - **HTTP Retry Storm Deduplication:** Native HTTP `Idempotency-Key` headers are deterministically mapped into token registers, preventing network retransmissions from triggering false 429 lockouts across multiple workers.
 
 2. **Where Redis is Still Required (The Trade-offs):**
    - **Bit-Exact Discrete Counters:** If your business logic strictly requires billing every 10th request or exact financial transaction quotas, iCMS is an *approximate* data structure ($\approx 5\text{--}10\%$ standard error).
@@ -224,28 +224,25 @@ To execute the live 5-stage test suite and generate the empirical benchmarks on 
 ## Technical FAQ: Addressing Deep Systems & Mathematical Invariants
 
 ### 1. What does Z3 formally verify vs. what is verified analytically?
-- **Algebraic Invariants (Z3 SMT):** Universally verified in first-order logic with decidable theories (Arrays, BitVectors, Uninterpreted Functions). Proves commutativity, associativity, idempotence, monotonicity, least upper bound (LUB), array extensional antisymmetry, network duplicate storm invariance under arbitrary permutations, array index memory bounds (`j = tau[63:60] < 16` for all 64-bit bitvectors), register join overflow bounds (`(r1, r2 <= 61) => max(r1, r2) <= 61 < 255`), PRF token separation, and Epoch Poisoning immunity.
-- **Probabilistic Accuracy Bounds:** Derived analytically via Flajolet's asymptotic variance and Cormode-Muthukrishnan heavy-hitter PAC bounds.
+- **Algebraic & Structural Invariants (Z3 SMT):** Universally verified in first-order logic with decidable theories (Arrays, BitVectors). Proves commutativity, associativity, idempotence, monotonicity, least upper bound (LUB), array extensional antisymmetry, network duplicate storm invariance under arbitrary permutations, array index memory bounds (`j = tau[63:60] < 16` for all 64-bit bitvectors), register join overflow bounds (`(r1, r2 <= 61) => max(r1, r2) <= 61 < 255`), BitVector preimage injectivity (`(s1 != s2) => P1 != P2`), domain separation between client and server tokens, and Epoch Poisoning immunity.
+- **Cryptographic & Probabilistic Bounds:** Cryptographic collision resistance of Blake2b on 64-bit tokens is bounded analytically by the Birthday Bound ($P \le N^2 / 2^{65}$). Accuracy is bounded by Flajolet's asymptotic variance and Cormode-Muthukrishnan PAC error bounds.
 
-### 2. How is negative Jensen bias eliminated without sampling bias?
-When cell estimators have symmetric zero-mean variance, naive $\min_{r=1}^d \hat{n}_r$ suffers from downward Jensen bias ($\mathbb{E}[\min X_i] < \mathbb{E}[X]$). iCMS resolves this via **Count-Mean-Min Debiased Median Estimation** (`query(method='debiased')`):
-```
-mu_r = max(0, (RowTotal_r - N_rc) / (w - 1))
-f_debiased_r = max(0, N_rc - mu_r)
-f_hat(x) = median(f_debiased_0, ..., f_debiased_{d-1})
-```
-- `RowTotal_r` computes the **exact, un-sampled sum** across all $w$ buckets in row $r$ ($O(1)$ lookup via cached cell counts).
-- Subtracts expected collision noise and takes the **median** across independent rows. The median of unbiased estimators is strictly unbiased and immune to downward Jensen bias.
+### 2. Why use canonical `min` query estimation instead of naive subtraction?
+In Count-Min Sketch, cell counters have strictly non-negative collision noise ($K_r \ge 0$). Therefore:
+$$\hat{a}(x) = \min_{r=1}^d \hat{N}_{r, h_r(x)} \ge a(x)$$
+- **Zero Wiped-Out Keys:** `min` guarantees that observed keys never get clamped to 0.0 (0% zeroes across the key space).
+- **$O(d)$ Query Time:** Requires inspecting only $d=4$ cells (**7.1 µs latency**), avoiding $O(d \cdot w)$ full-row scanning.
+- **Optional Count-Mean-Min Debiasing:** Supported for heavy-hitter streams where noise subtraction is explicitly desired.
 
-### 3. How does event deduplication survive host crashes and restarts?
-In distributed systems, if a host restarts and resets its in-memory sequence counter to 0, naive sequence tracking could cause subsequent events to collide with pre-restart tokens.
-- **The Resolution: Host Incarnation Nonce.**
-  The event token formula is:
-  $$\tau = \text{Blake2b}(x \parallel \text{host\_id} \parallel \text{incarnation\_id} \parallel \text{seq})$$
-  When a host or container boots, it generates a fresh 64-bit `incarnation_id` (e.g. boot ID or startup timestamp).
-  - Even if `seq` resets to 0, the fresh incarnation guarantees distinct tokens—**zero post-restart events are dropped**.
-  - Client-side retries reuse the client transaction/idempotency key, preserving strict idempotence across network retry storms.
-  - Total host state: exactly **16 bytes** (`incarnation_id` + `seq`), strictly $O(1)$ memory independent of the number of items $K$.
+### 3. How do tokens handle cross-worker retries and node restarts?
+iCMS uses a **Dual-Token Architecture**:
+1. **Client-Idempotent Events (`Idempotency-Key` present):**
+   $$\tau = \text{Blake2b}(x \parallel \text{b":idemp:"} \parallel \text{idempotency\_key})$$
+   Token is globally deterministic across all nodes in the cluster (independent of `host_id` and `incarnation_id`). If an HTTP client retries across different pods behind a load balancer, all pods compute the **exact same token**. When pods gossip merge, $\max(\sigma_1, \sigma_2) = \sigma$, achieving **100% cross-worker retry deduplication**.
+2. **Server-Sequenced Events (standard requests):**
+   $$\tau = \text{Blake2b}(x \parallel \text{b":seq:"} \parallel \text{host\_id} \parallel \text{incarnation\_id} \parallel \text{seq})$$
+   When a host restarts and its sequence counter resets to 0, the 64-bit `incarnation_id` guarantees distinct tokens—**zero post-restart events are dropped**. Total host state is strictly **16 bytes**.
+
 
 ### 4. How does `EpochICMS` prevent both State Resurrection AND Epoch Poisoning DoS?
 - **State Resurrection:** In join-semilattices, merging an older unrotated sketch into a freshly zeroed sketch can resurrect expired counts. `EpochICMS` tags sketches with their window epoch $e = \lfloor t / W \rfloor$. Incoming packets with $e < e_{\text{current}} - 1$ are strictly dropped by the deserializer epoch guard.

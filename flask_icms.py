@@ -72,26 +72,28 @@ class FlaskICMS:
             @wraps(f)
             def decorated_function(*args, **kwargs):
                 key = key_func() if key_func is not None else self._get_client_key()
-                # Check for client-provided idempotency key or generate monotonic seq
                 client_idempotency_token = request.headers.get("Idempotency-Key")
-                if client_idempotency_token:
-                    # Deterministic hash of client-provided token
-                    seq_num = int.from_bytes(client_idempotency_token.encode()[:8].ljust(8, b"\0"), "little")
-                else:
-                    self._seq += 1
-                    seq_num = self._seq
 
                 endpoint_key = f"{request.endpoint or 'endpoint'}:{key.lower()}"
 
-                # Add event occurrence
-                self.epoch_sketch.add(
-                    endpoint_key,
-                    host_id=self.worker_id,
-                    seq=seq_num,
-                    incarnation_id=self.incarnation_id,
-                )
+                if client_idempotency_token:
+                    # Client-identified event: globally deterministic token across all workers.
+                    # Hashed completely via Blake2b (no 8-byte prefix truncation).
+                    self.epoch_sketch.add(
+                        endpoint_key,
+                        idempotency_key=client_idempotency_token,
+                    )
+                else:
+                    # Server-sequenced event: monotonic counter scoped to worker and incarnation
+                    self._seq += 1
+                    self.epoch_sketch.add(
+                        endpoint_key,
+                        host_id=self.worker_id,
+                        seq=self._seq,
+                        incarnation_id=self.incarnation_id,
+                    )
 
-                current_count = self.epoch_sketch.query(endpoint_key)
+                current_count = self.epoch_sketch.query(endpoint_key, method="min")
 
                 if int(round(current_count)) > eff_limit:
                     resp = jsonify({
@@ -128,22 +130,24 @@ class FlaskICMS:
             (is_blocked, current_estimate, remaining)
         """
         eff_limit = limit if limit is not None else self.default_limit
-        if idempotency_key:
-            seq_num = int.from_bytes(idempotency_key.encode()[:8].ljust(8, b"\0"), "little")
+        if idempotency_key is not None:
+            self.epoch_sketch.add(
+                key,
+                idempotency_key=idempotency_key,
+            )
         else:
             self._seq += 1
-            seq_num = self._seq
-
-        self.epoch_sketch.add(
-            key,
-            host_id=self.worker_id,
-            seq=seq_num,
-            incarnation_id=self.incarnation_id,
-        )
-        current_count = self.epoch_sketch.query(key)
+            self.epoch_sketch.add(
+                key,
+                host_id=self.worker_id,
+                seq=self._seq,
+                incarnation_id=self.incarnation_id,
+            )
+        current_count = self.epoch_sketch.query(key, method="min")
         is_blocked = int(round(current_count)) > eff_limit
         remaining = max(0, eff_limit - int(round(current_count)))
         return is_blocked, current_count, remaining
+
 
     def sync_gossip_from(self, other: FlaskICMS) -> bool:
         """Simulate P2P gossip sync between Flask workers."""

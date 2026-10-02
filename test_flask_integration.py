@@ -108,23 +108,57 @@ def run_tests():
     print("  [100% PROVED]  Distributed multi-worker policy enforced without Redis!")
 
     # -----------------------------------------------------------------
-    # TEST 3: HTTP Idempotency-Key Deduplication under Retry Storm
+    # TEST 3: HTTP Idempotency-Key Deduplication & Prefix-Spray Defense
     # -----------------------------------------------------------------
-    print("\n[Test 3] HTTP Idempotency-Key Deduplication under Client Retry Storm")
-    app3, limiter3 = create_app(worker_id=3, limit=5, window=60)
-    client3 = app3.test_client()
+    print("\n[Test 3] HTTP Idempotency-Key Deduplication & Attack Defense")
+    app3_w1, limiter3_w1 = create_app(worker_id=10, limit=5, window=60)
+    app3_w2, limiter3_w2 = create_app(worker_id=20, limit=5, window=60)
+    c3_w1 = app3_w1.test_client()
+    c3_w2 = app3_w2.test_client()
 
-    # User bob sends 1 payment request with Idempotency-Key, but network causes 10 retransmissions
+    # 3a. Single-worker network retransmissions
     idempotent_key = "req_uuid_pay_987654321"
     headers = {"REMOTE_ADDR": "192.168.1.5", "HTTP_IDEMPOTENCY_KEY": idempotent_key}
 
     for dup in range(10):
-        resp_dup = client3.post("/api/v1/chat", environ_base=headers)
-        assert resp_dup.status_code == 200, f"Retry {dup} should be 200 OK due to idempotence, got {resp_dup.status_code}"
+        resp_dup = c3_w1.post("/api/v1/chat", environ_base=headers)
+        assert resp_dup.status_code == 200, f"Retry {dup} should be 200 OK, got {resp_dup.status_code}"
 
-    print(f"  Client sent 10 identical HTTP requests with Idempotency-Key: {idempotent_key}")
-    print(f"  All 10 requests returned           : HTTP 200 OK (Not locked out!)")
-    print("  [100% PROVED]  Idempotent tokens prevent false 429 lockouts during client retries!")
+    print(f"  [3a] 10 retransmissions with identical Idempotency-Key -> All returned HTTP 200 OK")
+
+    # 3b. Cross-worker retry deduplication (retrying on different pods behind load balancer)
+    cross_pod_key = "tx_global_cart_checkout_777"
+    r_w1 = c3_w1.post("/api/v1/chat", environ_base={"REMOTE_ADDR": "10.1.2.3", "HTTP_IDEMPOTENCY_KEY": cross_pod_key})
+    r_w2 = c3_w2.post("/api/v1/chat", environ_base={"REMOTE_ADDR": "10.1.2.3", "HTTP_IDEMPOTENCY_KEY": cross_pod_key})
+    assert r_w1.status_code == 200 and r_w2.status_code == 200
+
+    # Sync gossip across pods
+    limiter3_w1.sync_gossip_from(limiter3_w2)
+    limiter3_w2.sync_gossip_from(limiter3_w1)
+
+    est_w1 = limiter3_w1.epoch_sketch.query("chat_endpoint:ip:10.1.2.3", method="min")
+    assert round(est_w1) == 1, f"Cross-worker retry must count as 1, got {est_w1}"
+    print(f"  [3b] Cross-worker retry (Worker 1 -> Worker 2) -> Merged count strictly 1.0 (Zero double-count)")
+
+    # 3c. Anti-Exploit Test: Prefix-Spray Attack (req_uuid_tx_000001 .. req_uuid_tx_000050)
+    attacker_ip = "198.51.100.99"
+    allowed_count = 0
+    blocked_count = 0
+    for i in range(50):
+        resp_att = c3_w1.post(
+            "/api/v1/chat",
+            environ_base={"REMOTE_ADDR": attacker_ip, "HTTP_IDEMPOTENCY_KEY": f"req_uuid_tx_{i:06d}"},
+        )
+        if resp_att.status_code == 200:
+            allowed_count += 1
+        elif resp_att.status_code == 429:
+            blocked_count += 1
+
+    assert allowed_count == 5, f"Limit must enforce exactly 5 allowed, got {allowed_count}"
+    assert blocked_count == 45, f"Must block remaining 45 with 429, got {blocked_count}"
+    print(f"  [3c] Attacker sprayed 50 distinct requests sharing prefix 'req_uuid_tx_' -> Blocked {blocked_count}/50!")
+    print("  [100% PROVED]  Prefix bypass exploit is dead; cross-worker retries deduplicated!")
+
 
     # -----------------------------------------------------------------
     # TEST 4: Anti-DoS Fixed Memory Safety (20,000-IP Spray)

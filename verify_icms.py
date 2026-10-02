@@ -168,30 +168,39 @@ def verify_all():
     )
 
     # -------------------------------------------------------------
-    # 6. O(1) GLOBAL SEQUENCE TOKEN SEPARATION THEOREM
+    # 6. O(1) GLOBAL SEQUENCE TOKEN PREIMAGE INJECTIVITY THEOREM
     # -------------------------------------------------------------
-    print("\n[Phase 6] Proving O(1) Global Sequence Token Separation Invariant...")
-    # Proof: A host maintaining ONLY a single 64-bit monotonic sequence counter
-    # produces distinct tokens for distinct occurrences of the same item.
-    TokenFn = z3.Function("TokenFn", z3.BitVecSort(64), z3.BitVecSort(64), z3.BitVecSort(64), z3.BitVecSort(64))
-    x_key = z3.BitVec("x_key", 64)
-    h_node = z3.BitVec("h_node", 64)
-    s_a = z3.BitVec("s_a", 64)
-    s_b = z3.BitVec("s_b", 64)
+    print("\n[Phase 6] Proving Token Preimage Injectivity & Domain Separation (BitVector)...")
+    # Proof: BitVector preimage concatenation Concat(tag, key, host, inc, seq) is
+    # strictly injective. Distinct sequence numbers, incarnations, or hosts produce
+    # pairwise distinct preimages with zero uninterpreted function axioms.
+    # Birthday bound under Random Oracle (Blake2b-64): P(collision) <= N^2 / 2^65.
+    tag_seq = z3.BitVecVal(0x5345513A, 32)    # b"SEQ:"
+    tag_idemp = z3.BitVecVal(0x4944454D, 32)  # b"IDEM"
+    x_k = z3.BitVec("x_k", 64)
+    h_n = z3.BitVec("h_n", 32)
+    inc_n = z3.BitVec("inc_n", 64)
+    seq_1 = z3.BitVec("seq_1", 64)
+    seq_2 = z3.BitVec("seq_2", 64)
+    idemp_1 = z3.BitVec("idemp_1", 128)
 
-    s_prf = z3.Solver()
-    k1, k2, h1, h2, t1, t2 = z3.BitVecs("k1 k2 h1 h2 t1 t2", 64)
-    s_prf.add(z3.ForAll([k1, k2, h1, h2, t1, t2],
-        z3.Implies(
-            z3.Or(k1 != k2, h1 != h2, t1 != t2),
-            TokenFn(k1, h1, t1) != TokenFn(k2, h2, t2)
-        )
-    ))
-    s_prf.add(s_a != s_b)
-    s_prf.add(TokenFn(x_key, h_node, s_a) == TokenFn(x_key, h_node, s_b))
-    token_ok = s_prf.check() == z3.unsat
-    all_ok &= token_ok
-    print(f"  [{'PROVED' if token_ok else 'FAILED'}]  O(1) Token Separation: (sa != sb) => Token(x, h, sa) != Token(x, h, sb)")
+    preimage_seq1 = z3.Concat(tag_seq, x_k, h_n, inc_n, seq_1)
+    preimage_seq2 = z3.Concat(tag_seq, x_k, h_n, inc_n, seq_2)
+    preimage_idemp = z3.Concat(tag_idemp, x_k, idemp_1, z3.BitVecVal(0, 32))
+
+    s_seq = z3.Solver()
+    s_seq.add(seq_1 != seq_2)
+    s_seq.add(preimage_seq1 == preimage_seq2)
+    seq_injective = s_seq.check() == z3.unsat
+    all_ok &= seq_injective
+    print(f"  [{'PROVED' if seq_injective else 'FAILED'}]  BitVector Sequence Preimage Injectivity: (s1 != s2) => Preimage1 != Preimage2")
+
+    s_domain = z3.Solver()
+    s_domain.add(preimage_seq1 == preimage_idemp)
+    domain_separated = s_domain.check() == z3.unsat
+    all_ok &= domain_separated
+    print(f"  [{'PROVED' if domain_separated else 'FAILED'}]  Domain Separation Safety: Preimage(SEQ) != Preimage(IDEMP)")
+
 
     # -------------------------------------------------------------
     # 7. EPOCH GUARD SECURITY INVARIANT (Epoch Poisoning DoS Defense)

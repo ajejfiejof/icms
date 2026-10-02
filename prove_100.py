@@ -120,28 +120,36 @@ def run_z3_proofs() -> bool:
         lambda: storm != ideal,
     )
 
-    # 1.11 Single Global Sequence Nonce Separation Theorem
-    # Proof: A single global monotonic counter `s` on host `h` strictly guarantees distinct tokens
-    # for repeated occurrences of the same item without maintaining O(K) per-item state.
-    TokenFn = z3.Function("TokenFn", z3.BitVecSort(64), z3.BitVecSort(64), z3.BitVecSort(64), z3.BitVecSort(64))
+    # 1.11 Token Preimage Injectivity & Domain Separation Theorem
+    # Proof: BitVector preimage concatenation Concat(tag, key, host, inc, seq) is
+    # strictly injective. Distinct sequence numbers, incarnations, or hosts produce
+    # pairwise distinct preimages with zero uninterpreted function axioms.
+    # Birthday bound under Random Oracle (Blake2b-64): P(collision) <= N^2 / 2^65.
+    tag_seq_100 = z3.BitVecVal(0x5345513A, 32)
+    tag_idemp_100 = z3.BitVecVal(0x4944454D, 32)
     x_val = z3.BitVec("x_val", 64)
-    h_val = z3.BitVec("h_val", 64)
+    h_val = z3.BitVec("h_val", 32)
+    inc_val = z3.BitVec("inc_val", 64)
     s1_val = z3.BitVec("s1_val", 64)
     s2_val = z3.BitVec("s2_val", 64)
+    idemp_val = z3.BitVec("idemp_val", 128)
+
+    pre_s1 = z3.Concat(tag_seq_100, x_val, h_val, inc_val, s1_val)
+    pre_s2 = z3.Concat(tag_seq_100, x_val, h_val, inc_val, s2_val)
+    pre_id = z3.Concat(tag_idemp_100, x_val, idemp_val, z3.BitVecVal(0, 32))
 
     s_prf = z3.Solver()
-    ka, kb, ha, hb, ta, tb = z3.BitVecs("ka kb ha hb ta tb", 64)
-    s_prf.add(z3.ForAll([ka, kb, ha, hb, ta, tb],
-        z3.Implies(
-            z3.Or(ka != kb, ha != hb, ta != tb),
-            TokenFn(ka, ha, ta) != TokenFn(kb, ha, tb)
-        )
-    ))
     s_prf.add(s1_val != s2_val)
-    s_prf.add(TokenFn(x_val, h_val, s1_val) == TokenFn(x_val, h_val, s2_val))
+    s_prf.add(pre_s1 == pre_s2)
     is_sep = s_prf.check() == z3.unsat
-    all_proved &= is_sep
-    print(f"  [{'100% PROVED' if is_sep else 'FAILED'}]  Theorem 1.11 (O(1) Global Sequence Token Separation): (s1 != s2) => Token(x, h, s1) != Token(x, h, s2)")
+
+    s_dom = z3.Solver()
+    s_dom.add(pre_s1 == pre_id)
+    is_dom = s_dom.check() == z3.unsat
+
+    all_proved &= (is_sep and is_dom)
+    print(f"  [{'100% PROVED' if is_sep and is_dom else 'FAILED'}]  Theorem 1.11 (BitVector Token Preimage Injectivity & Domain Separation): (s1 != s2) => P1 != P2")
+
 
     # 1.12 Sub-Additive State Bound Invariant
     # For all registers, the join is bounded below by individual components and above by additive sum

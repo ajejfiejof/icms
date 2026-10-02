@@ -195,15 +195,16 @@ def run_benchmark():
             ("iCMS (Ours)", agg_icms, agg_icms.size_bytes()),
         ]
 
-        print(f"{'Method':<16} | {'Size':<8} | {'HH Rel Err':<11} | {'Mean Norm Err':<14} | {'Max Norm Err':<12} | {'Behavior'}")
-        print("-" * 85)
+        print(f"{'Method':<16} | {'Size':<8} | {'All Med Rel':<11} | {'HH Rel Err':<11} | {'Zeroes':<7} | {'Max PAC Err':<12} | {'Behavior'}")
+        print("-" * 95)
         for name, agg, sz in methods:
+            all_errs = [abs(agg.query(k) - true_counts[k]) / true_counts[k] for k in items if true_counts[k] > 0]
             hh_errs = [abs(agg.query(k) - true_counts[k]) / true_counts[k] for k in top_20]
-            norm_errs = [abs(agg.query(k) - true_counts[k]) / total_ops for k in items]
+            all_med = statistics.median(all_errs) * 100
             hh_mean = statistics.mean(hh_errs) * 100
-            norm_mean = statistics.mean(norm_errs) * 100
-            norm_max = max(norm_errs) * 100
-            
+            zero_cnt = sum(1 for k in items if agg.query(k) == 0.0)
+            pac_max = max(abs(agg.query(k) - true_counts[k]) / total_ops for k in items) * 100
+
             if name == "CMS (Sum)":
                 behavior = "Accurate" if dup_ratio == 0 else f"EXPLODES ({hh_mean:.0f}% error)"
             elif name == "CMS (Max)":
@@ -214,7 +215,8 @@ def run_benchmark():
                 behavior = "IDEMPOTENT (Zero dup surge, O(1) space)"
 
             sz_str = f"{sz / 1024:.1f} KB" if sz < 1024 * 1024 else f"{sz / (1024 * 1024):.1f} MB"
-            print(f"{name:<16} | {sz_str:<8} | {hh_mean:>9.1f}% | {norm_mean:>12.2f}% | {norm_max:>10.2f}% | {behavior}")
+            print(f"{name:<16} | {sz_str:<8} | {all_med:>10.1f}% | {hh_mean:>9.1f}% | {zero_cnt:>3}/100 | {pac_max:>10.2f}% | {behavior}")
+
 
     print("\n" + "=" * 80)
     print("SCALE-OUT MEMORY ANALYSIS (w=128, d=4)")
