@@ -155,6 +155,29 @@ python open_webui_integration.py
 
 ---
 
+## Technical FAQ: Addressing Deep Systems & Mathematical Invariants
+
+### 1. Does taking the minimum over stochastic estimators cause negative Jensen bias?
+In classic Count-Min Sketch, cell counters have strictly non-negative additive collision noise (`K >= 0`), so taking `min()` is guaranteed to be an upper bound. However, because HLL estimators have zero-mean stochastic variance, a naive `min()` across rows incurs negative Jensen bias (`E[min(X_1..X_d)] < E[X]`).  
+**The Resolution:** iCMS implements **Count-Mean-Min with Median Estimation** (`query(method='debiased')`). It estimates the per-row expected collision noise:
+```
+mu_r = (Total_r - N_rc) / (w - 1)
+```
+and computes the **median** of the debiased estimates across hash rows. The median of independent unbiased estimators is strictly unbiased and eliminates negative Jensen bias.
+
+### 2. Does event deduplication require O(K) space per host to track sequences?
+**No, host space is strictly O(1) (8 bytes).**  
+The event token formula is `tau = Blake2b(item || host_id || global_seq)`. A host maintains a **single global monotonic counter** (or `ktime_get_ns()` / nanosecond timestamp) across *all* items. When `item_A` occurs at sequence 1 and sequence 3, both receive distinct tokens and are counted as 2 distinct occurrences. The host never stores per-item counters.
+
+### 3. How do you prevent state resurrection when rotating sliding windows?
+In join-semilattices, merging an older sketch into a freshly zeroed sketch can resurrect expired state under asynchronous clock skew.  
+**The Resolution:** iCMS provides `EpochICMS`, an **Epoch-Tagged Slotted CRDT**. Every sketch carries an epoch tag `e = floor(time() / window)`. Nodes maintain a 2-generation window (`current` and `previous`). In-flight gossip packets from expired epochs (`e < current - 1`) are strictly rejected by the epoch guard.
+
+### 4. What does Z3 formally verify vs. what is verified analytically?
+Z3 SMT solver proves the **algebraic and state-transition invariants** (commutativity, associativity, idempotence, monotonicity, LUB, extensional antisymmetry, and duplicate storm invariance under arbitrary permutations). The **probabilistic error bounds** are proven analytically using Flajolet's asymptotic variance and Cormode-Muthukrishnan heavy-hitter bounds.
+
+---
+
 ## Research Paper
 
 A preprint paper draft is included:

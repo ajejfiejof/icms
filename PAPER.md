@@ -61,6 +61,18 @@ The full sketch $\mathcal{M} \in (\mathcal{L}_m)^{d \times w}$ is a $d \times w$
 
 $$\forall r \in [0, d), c \in [0, w): \quad \mathcal{M}_{AB}[r][c] = \mathcal{M}_A[r][c] \sqcup_{\mathcal{L}} \mathcal{M}_B[r][c]$$
 
+### 2.4 Debiased Median Query (Jensen Bias Elimination)
+In classic Count-Min Sketch, cell counters have strictly non-negative collision noise ($K_r \ge 0$), making $\min_r C[r]$ a one-sided upper bound. However, when cells contain stochastic HLL estimators with symmetric zero-mean variance $\mathcal{N}(0, \sigma^2)$, taking $\min_{r=1}^d \hat{N}_r$ incurs negative Jensen bias ($\mathbb{E}[\min X_i] < \mathbb{E}[X_i]$). 
+
+To eliminate negative bias and collision noise, iCMS implements a **Count-Mean-Min Median Estimator**:
+1. Estimate expected background collision noise per row:
+   $$\hat{\mu}_r = \frac{\sum_{c'} \hat{N}_{r, c'} - \hat{N}_{r, \text{hash}_r(x)}}{w - 1}$$
+2. Compute debiased row estimates: $\tilde{N}_r = \max\left(0, \hat{N}_r - \hat{\mu}_r\right)$.
+3. Take the **median** across rows: $\hat{f}(x) = \text{median}(\tilde{N}_1, \dots, \tilde{N}_d)$. The median of independent unbiased estimators is strictly unbiased and robust to collision spikes.
+
+### 2.5 Epoch-Tagged Slotted CRDT (Preventing State Resurrection)
+In pure join-semilattices, resetting a local window to $\mathbf{0}$ creates a state-resurrection vulnerability if delayed gossip packets from the previous window arrive out of order. iCMS prevents this by tagging each sketch with its window epoch $e = \lfloor t / W \rfloor$. Nodes maintain a two-generation state $(\mathcal{M}_{\text{curr}}, \mathcal{M}_{\text{prev}})$. Any packet with $e < e_{\text{curr}} - 1$ is mathematically rejected by the epoch guard, guaranteeing zero state resurrection.
+
 ---
 
 ## 3. Universal SMT Formal Verification
