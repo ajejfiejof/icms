@@ -34,7 +34,7 @@ However, distributed aggregation requires combining sketches over lossy, peer-to
 
 We resolve the trilemma by lifting the underlying monoid from scalar integers to an **algebraic join-semilattice over logarithmic register arrays**.
 
-### 2.1 The Register Lattice $\mathcal{L}_m$
+### 2.1 The Register Lattice L_m
 
 Let $p$ be the precision parameter, yielding $m = 2^p$ registers per cell. A cell $\sigma \in \mathcal{L}_m$ is a vector of $m$ integer registers:
 
@@ -50,28 +50,48 @@ When an event $x \in \mathcal{U}$ occurs at host $h \in [0, R)$ with local monot
 
 $$\tau(x, h, k) = \text{Blake2b}(x \parallel h \parallel k, \text{key}=K_{\text{event}})$$
 
-The token $\tau$ updates the cell at row $r$, bucket $c = \text{hash}_r(x) \pmod w$:
-1. Register index: $j = \tau \gg (64 - p)$
-2. Run of zeros: $\rho = (64 - p) - \text{bit\_length}(\tau \ \& \ (2^{64-p} - 1)) + 1$
-3. Register update: $\sigma_{r, c}[j] \leftarrow \max(\sigma_{r, c}[j], \rho)$
+The token $\tau$ updates the cell at row $r$, bucket $c = h_r(x) \bmod w$:
+
+```python
+# 1. Register index (top p bits)
+j = tau >> (64 - p)
+
+# 2. Leading zero rank of remaining (64 - p) bits
+v = tau & ((1 << (64 - p)) - 1)
+rho = (64 - p) - v.bit_length() + 1 if v else (64 - p) + 1
+
+# 3. Register lattice join (pointwise maximum)
+sigma[r, c][j] = max(sigma[r, c][j], rho)
+```
 
 ### 2.3 The iCMS Grid
 
 The full sketch $\mathcal{M} \in (\mathcal{L}_m)^{d \times w}$ is a $d \times w$ matrix of register lattices. Merging two sketches $\mathcal{M}_A$ and $\mathcal{M}_B$ is the component-wise join:
 
-$$\forall r \in [0, d), c \in [0, w): \quad \mathcal{M}_{AB}[r][c] = \mathcal{M}_A[r][c] \sqcup_{\mathcal{L}} \mathcal{M}_B[r][c]$$
+$$\mathcal{M}_{AB}(r, c) = \mathcal{M}_A(r, c) \sqcup_{\mathcal{L}} \mathcal{M}_B(r, c) \quad \text{for all } r \in [0, d), c \in [0, w)$$
 
 ### 2.4 Debiased Median Query (Jensen Bias Elimination)
-In classic Count-Min Sketch, cell counters have strictly non-negative collision noise ($K_r \ge 0$), making $\min_r C[r]$ a one-sided upper bound. However, when cells contain stochastic HLL estimators with symmetric zero-mean variance $\mathcal{N}(0, \sigma^2)$, taking $\min_{r=1}^d \hat{N}_r$ incurs negative Jensen bias ($\mathbb{E}[\min X_i] < \mathbb{E}[X_i]$). 
+
+In classic Count-Min Sketch, cell counters have strictly non-negative collision noise ($K_r \ge 0$), making $\min_r C[r]$ a one-sided upper bound. However, when cells contain stochastic HLL estimators with symmetric zero-mean variance $\mathcal{N}(0, \sigma^2)$, taking $\min_{r=1}^d \hat{N}_r$ incurs negative Jensen bias:
+
+$$\mathbb{E}\left[\min(X_1, \dots, X_d)\right] < \mathbb{E}[X_i]$$
 
 To eliminate negative bias and collision noise, iCMS implements a **Count-Mean-Min Median Estimator**:
-1. Estimate expected background collision noise per row:
-   $$\hat{\mu}_r = \frac{\sum_{c'} \hat{N}_{r, c'} - \hat{N}_{r, \text{hash}_r(x)}}{w - 1}$$
-2. Compute debiased row estimates: $\tilde{N}_r = \max\left(0, \hat{N}_r - \hat{\mu}_r\right)$.
-3. Take the **median** across rows: $\hat{f}(x) = \text{median}(\tilde{N}_1, \dots, \tilde{N}_d)$. The median of independent unbiased estimators is strictly unbiased and robust to collision spikes.
+
+```python
+# 1. Estimate expected collision noise per row
+mu_r = max(0.0, (row_sum - N_rc) / (w - 1))
+
+# 2. Compute debiased row estimate
+N_debiased_r = max(0.0, N_rc - mu_r)
+
+# 3. Final estimate: median of debiased row estimates (unbiased)
+f_hat = median(N_debiased_1, ..., N_debiased_d)
+```
 
 ### 2.5 Epoch-Tagged Slotted CRDT (Preventing State Resurrection)
-In pure join-semilattices, resetting a local window to $\mathbf{0}$ creates a state-resurrection vulnerability if delayed gossip packets from the previous window arrive out of order. iCMS prevents this by tagging each sketch with its window epoch $e = \lfloor t / W \rfloor$. Nodes maintain a two-generation state $(\mathcal{M}_{\text{curr}}, \mathcal{M}_{\text{prev}})$. Any packet with $e < e_{\text{curr}} - 1$ is mathematically rejected by the epoch guard, guaranteeing zero state resurrection.
+
+In pure join-semilattices, resetting a local window to zero creates a state-resurrection vulnerability if delayed gossip packets from the previous window arrive out of order. iCMS prevents this by tagging each sketch with its window epoch $e = \lfloor t / W \rfloor$. Nodes maintain a two-generation state $(\mathcal{M}_{\text{curr}}, \mathcal{M}_{\text{prev}})$. Any packet with $e < e_{\text{curr}} - 1$ is mathematically rejected by the epoch guard, guaranteeing zero state resurrection.
 
 ---
 
