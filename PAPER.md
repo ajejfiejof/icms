@@ -98,11 +98,11 @@ We benchmarked $\mathbb{I}$-CMS against all three standard architectures across 
 
 | Number of Replicas ($R$) | Additive CMS | Vector CRDT (G-Counter) | $\mathbb{I}$-CMS (Ours) | Memory Advantage |
 | :---: | :---: | :---: | :---: | :---: |
-| **10** | 2.0 KB | 20.0 KB | **8.0 KB** | $2.5\times$ |
-| **100** | 2.0 KB | 200.0 KB | **8.0 KB** | $25\times$ |
-| **1,000** | 2.0 KB | 1.95 MB | **8.0 KB** | $250\times$ |
-| **10,000** | 2.0 KB | 19.53 MB | **8.0 KB** | $2,500\times$ |
-| **50,000** | 2.0 KB | 97.66 MB | **8.0 KB** | **$12,200\times$** |
+| **10** | 2.0 KB | 20.0 KB | **8.0 KB** | 2.5x |
+| **100** | 2.0 KB | 200.0 KB | **8.0 KB** | 25x |
+| **1,000** | 2.0 KB | 1.95 MB | **8.0 KB** | 250x |
+| **10,000** | 2.0 KB | 19.53 MB | **8.0 KB** | 2,500x |
+| **50,000** | 2.0 KB | 97.66 MB | **8.0 KB** | **12,200x** |
 
 ---
 
