@@ -195,8 +195,46 @@ To quantify end-to-end telemetry and rate limiting behavior in production applic
 
 ---
 
-## 5. Artifacts & Code Availability
+## 5. Theoretical Boundaries & Architectural Post-Mortem
 
+Peer review and red-team audits of iCMS identified four fundamental theoretical boundaries and algorithmic trade-offs that characterize the system:
+
+### 5.1 The Monoid Homomorphism Mismatch: Multiset Sum vs Set Union
+
+Streaming sketches are fundamentally monoid homomorphisms:
+* **Count-Min Sketch (CMS)** maps the monoid of multisets under multiset sum $(\mathcal{M}(\mathcal{U}), \uplus)$ to the monoid of counter vectors under componentwise addition $(\mathbb{N}^{d \times w}, +)$. Because addition is associative and commutative, updates commute, but addition is strictly non-idempotent ($x + x \ne x$).
+* **HyperLogLog (HLL)** maps the monoid of sets under union $(\mathcal{P}(\mathcal{U}), \cup)$ to register vectors under pointwise maximum $(\mathbb{N}^m, \max)$. Because $\max$ is idempotent ($x \max x = x$), duplicate updates vanish.
+
+To represent multiset frequencies within an idempotent semilattice, iCMS reduces multiset frequency to set cardinality by indexing occurrences with sequence tokens: $\tau(x, k) = (x, k)$, such that $|\{(x, 1), \dots, (x, f(x))\}| = f(x)$.
+
+**The Distributed Retry Dilemma:**
+1. **Server-Generated Tokens:** If a node assigns $k = (\text{host\_id}, \text{incarnation\_id}, \text{seq})$ locally, an unacknowledged HTTP request retried across distinct worker pods (or across a node crash/reboot) receives different nonces $(x, \text{pod}_1, s_1)$ vs $(x, \text{pod}_2, s_2)$. Upon gossip merge, both occurrences enter the HLL register and are double-counted. Strong idempotence across independent hosts without consensus requires client-supplied tokens.
+2. **Client-Generated Tokens:** When clients supply standard HTTP `Idempotency-Key` headers, token uniqueness is globally deterministic across all replica nodes ($\tau = \text{Blake2b}(x \parallel \text{key})$). In this regime, iCMS provides bounded-memory approximate set union without storing raw key sets, but the deduplication primitive itself is provided by the application protocol.
+
+### 5.2 Jensen's Inequality & Selection Bias in Stochastic Minimum Estimators
+
+In classical Count-Min sketches, counters accumulate non-negative collision noise:
+$$C[r][h_r(x)] = f(x) + \sum_{y \ne x, h_r(y)=h_r(x)} f(y) \ge f(x)$$
+Because noise is strictly non-negative, each bucket is a deterministic upper bound ($C[r] \ge f(x)$ with probability 1), and $\min_{r=1}^d C[r]$ is mathematically sound.
+
+In iCMS, each bucket $C[r][c]$ is an HLL estimator—a probabilistic random variable with symmetric/log-normal error $\sigma \approx \frac{1.04}{\sqrt{m}} \cdot N$. By Jensen's inequality and the theory of order statistics:
+$$\mathbb{E}\left[\min_{1 \le r \le d} X_r\right] < \min_{1 \le r \le d} \mathbb{E}[X_r]$$
+
+For $d=4$ independent estimators, extreme value theory indicates that $\mathbb{E}[\min X_r] \approx \mu - 1.029 \sigma$. With $p=4$ ($m=16$, $\sigma \approx 0.26 \mu$):
+$$\mathbb{E}[\hat{f}(x)] \approx \mu (1 - 1.029 \times 0.26) \approx 0.732 \mu$$
+This produces a structural negative selection bias (~26.8% undercounting) on clean streams with zero hash collisions.
+
+Attempting to correct this via Count-Mean-Min debiasing ($\max(0, \hat{N} - \mu_{\text{noise}})$) fails on tail keys because the average row noise $\mu_{\text{noise}}$ exceeds the frequency of rare items, clamping them to 0.0. iCMS retains the canonical $\min$ estimator to avoid false zeroes, trading off precision on low-frequency items for robust heavy-hitter detection.
+
+### 5.3 Formal Verification Scope: SMT First-Order Theories vs PAC Bounds
+
+First-order SMT solvers (Z3) verify decidable fragments of logic (uninterpreted functions, bitvectors, and real arithmetic):
+* **What Z3 Verifies:** Algebraic lattice properties (associativity, commutativity, idempotency of $\max$), index array safety, and syntactic tuple separation of bitvector concatenations.
+* **What Z3 Does Not Verify:** Cryptographic collision resistance of hash functions (e.g., Blake2b-64), which is bounded by the Birthday Paradox ($O(2^{32})$), or the probabilistic $(\epsilon, \delta)$ PAC bounds of HyperLogLog, which require interactive theorem provers (Lean 4, Coq, Isabelle) formalizing measure spaces and probability theory.
+
+---
+
+## 6. Artifacts & Code Availability
 
 All source code, formal proofs, and reproduction scripts are located in the repository:
 * [`icms.py`](icms.py): Core iCMS data structure and join-semilattice algorithms.
@@ -209,6 +247,6 @@ All source code, formal proofs, and reproduction scripts are located in the repo
 
 ---
 
-## 6. Conclusion
+## 7. Conclusion
 
-The Idempotent Count-Min Lattice (iCMS) provides the first provably correct, constant-memory solution to the Distributed Telemetry Trilemma. By unifying Count-Min hash indexing with bounded register join-semilattices, iCMS guarantees Strong Eventual Consistency (SEC) and exact network duplicate immunity under arbitrary gossip storms, while eliminating the multi-megabyte state bloat of vector CRDTs.
+The Idempotent Count-Min Lattice (iCMS) provides a constant-memory, crash-resilient frequency sketch for distributed telemetry. While subject to the fundamental monoid homomorphism boundary between multisets and sets and the Jensen selection bias of stochastic minimum estimators, iCMS guarantees Strong Eventual Consistency (SEC) and exact network duplicate immunity under arbitrary gossip storms, eliminating the unbounded state bloat of vector CRDTs.
