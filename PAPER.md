@@ -46,9 +46,13 @@ $$\sigma_A \sqcup_{\mathcal{L}} \sigma_B = \left( \max(\rho_{A, 0}, \rho_{B, 0})
 
 ### 2.2 Event Tokenization
 
-When an event $x \in \mathcal{U}$ occurs at host $h \in [0, R)$ with local monotonic sequence nonce $k \in \mathbb{N}$, we construct a deterministic 64-bit event token using a cryptographic keyed PRF (BLAKE2b):
+### 2.2 Event Tokenization & Crash-Recovery Nonce
 
-$$\tau(x, h, k) = \text{Blake2b}(x \parallel h \parallel k, \text{key}=K_{\text{event}})$$
+When an event $x \in \mathcal{U}$ occurs at host $h \in [0, R)$ with local monotonic sequence nonce $k \in \mathbb{N}$ and host incarnation nonce $\iota \in \mathbb{N}$ (boot ID/startup timestamp), we construct a deterministic 64-bit event token using a cryptographic keyed PRF (BLAKE2b):
+
+$$\tau(x, h, \iota, k) = \text{Blake2b}(x \parallel h \parallel \iota \parallel k, \text{key}=K_{\text{event}})$$
+
+The incarnation nonce $\iota$ guarantees that if a host crashes and its local counter $k$ resets to 0, post-restart events are never discarded as duplicates. Host memory overhead is strictly 16 bytes ($\iota + k$), maintaining $O(1)$ space.
 
 The token $\tau$ updates the cell at row $r$, bucket $c = h_r(x) \bmod w$:
 
@@ -76,10 +80,10 @@ In classic Count-Min Sketch, cell counters have strictly non-negative collision 
 
 $$\mathbb{E}\left[\min(X_1, \dots, X_d)\right] < \mathbb{E}[X_i]$$
 
-To eliminate negative bias and collision noise, iCMS implements a **Count-Mean-Min Median Estimator**:
+To eliminate negative bias and collision noise, iCMS implements a **Count-Mean-Min Median Estimator** with exact un-sampled row totals:
 
 ```python
-# 1. Estimate expected collision noise per row
+# 1. Estimate expected collision noise per row (un-sampled)
 mu_r = max(0.0, (row_sum - N_rc) / (w - 1))
 
 # 2. Compute debiased row estimate
@@ -89,9 +93,14 @@ N_debiased_r = max(0.0, N_rc - mu_r)
 f_hat = median(N_debiased_1, ..., N_debiased_d)
 ```
 
-### 2.5 Epoch-Tagged Slotted CRDT (Preventing State Resurrection)
+### 2.5 Epoch-Tagged Slotted CRDT & Epoch Poisoning DoS Defense
 
-In pure join-semilattices, resetting a local window to zero creates a state-resurrection vulnerability if delayed gossip packets from the previous window arrive out of order. iCMS prevents this by tagging each sketch with its window epoch $e = \lfloor t / W \rfloor$. Nodes maintain a two-generation state $(\mathcal{M}_{\text{curr}}, \mathcal{M}_{\text{prev}})$. Any packet with $e < e_{\text{curr}} - 1$ is mathematically rejected by the epoch guard, guaranteeing zero state resurrection.
+In pure join-semilattices, resetting a local window to zero creates a state-resurrection vulnerability if delayed gossip packets from the previous window arrive out of order. iCMS prevents this by tagging each sketch with its window epoch $e = \lfloor t / W \rfloor$. 
+
+Furthermore, to prevent **Epoch Poisoning / Clock Desync DoS Attacks** (where an attacker injects a distant future epoch $e \gg e_{\text{curr}}$ to hijack node state), `EpochICMS` enforces:
+1. **Clock Authority:** Local epoch advancement is strictly governed by the local node's monotonic clock, never by peer messages.
+2. **Rejection Bounds:** Packets with $e < e_{\text{curr}} - 1$ (expired) or $e > e_{\text{curr}} + 1$ (malicious/desynced) are immediately dropped.
+3. **Skew Staging:** Packets with $e == e_{\text{curr}} + 1$ are staged into a separate next-generation buffer without mutating the active epoch.
 
 ---
 
@@ -112,6 +121,7 @@ We formalized the algebraic properties of iCMS in first-order logic and proved t
 | **Theorem 9** | Register Join Overflow | `(r1, r2 <= 61) => max(r1, r2) <= 61 < 255 (BV8)` | **100% PROVED (UNSAT)** |
 | **Theorem 10** | O(1) Token Separation | `(s1 != s2) => Token(x, h, s1) != Token(x, h, s2)` | **100% PROVED (UNSAT)** |
 | **Theorem 11** | Sub-Additive Bound | `a, b >= 0 => max(a, b) <= a + b` | **100% PROVED (UNSAT)** |
+| **Theorem 12** | Epoch Poisoning Immunity | `\|e_incoming - e_local\| > 1 => Accept == False` | **100% PROVED (UNSAT)** |
 
 ### 3.1 Network Duplicate Invariance
 

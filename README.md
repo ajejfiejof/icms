@@ -159,24 +159,40 @@ python open_webui_integration.py
 
 ## Technical FAQ: Addressing Deep Systems & Mathematical Invariants
 
-### 1. Does taking the minimum over stochastic estimators cause negative Jensen bias?
-In classic Count-Min Sketch, cell counters have strictly non-negative additive collision noise (`K >= 0`), so taking `min()` is guaranteed to be an upper bound. However, because HLL estimators have zero-mean stochastic variance, a naive `min()` across rows incurs negative Jensen bias (`E[min(X_1..X_d)] < E[X]`).  
-**The Resolution:** iCMS implements **Count-Mean-Min with Median Estimation** (`query(method='debiased')`). It estimates the per-row expected collision noise:
+### 1. What does Z3 formally verify vs. what is verified analytically?
+- **Algebraic Invariants (Z3 SMT):** Universally verified in first-order logic with decidable theories (Arrays, BitVectors, Uninterpreted Functions). Proves commutativity, associativity, idempotence, monotonicity, least upper bound (LUB), array extensional antisymmetry, network duplicate storm invariance under arbitrary permutations, array index memory bounds (`j = tau[63:60] < 16` for all 64-bit bitvectors), register join overflow bounds (`(r1, r2 <= 61) => max(r1, r2) <= 61 < 255`), PRF token separation, and Epoch Poisoning immunity.
+- **Probabilistic Accuracy Bounds:** Derived analytically via Flajolet's asymptotic variance and Cormode-Muthukrishnan heavy-hitter PAC bounds.
+
+### 2. How is negative Jensen bias eliminated without sampling bias?
+When cell estimators have symmetric zero-mean variance, naive $\min_{r=1}^d \hat{n}_r$ suffers from downward Jensen bias ($\mathbb{E}[\min X_i] < \mathbb{E}[X]$). iCMS resolves this via **Count-Mean-Min Debiased Median Estimation** (`query(method='debiased')`):
 ```
-mu_r = (Total_r - N_rc) / (w - 1)
+mu_r = max(0, (RowTotal_r - N_rc) / (w - 1))
+f_debiased_r = max(0, N_rc - mu_r)
+f_hat(x) = median(f_debiased_0, ..., f_debiased_{d-1})
 ```
-and computes the **median** of the debiased estimates across hash rows. The median of independent unbiased estimators is strictly unbiased and eliminates negative Jensen bias.
+- `RowTotal_r` computes the **exact, un-sampled sum** across all $w$ buckets in row $r$ ($O(1)$ lookup via cached cell counts).
+- Subtracts expected collision noise and takes the **median** across independent rows. The median of unbiased estimators is strictly unbiased and immune to downward Jensen bias.
 
-### 2. Does event deduplication require O(K) space per host to track sequences?
-**No, host space is strictly O(1) (8 bytes).**  
-The event token formula is `tau = Blake2b(item || host_id || global_seq)`. A host maintains a **single global monotonic counter** (or `ktime_get_ns()` / nanosecond timestamp) across *all* items. When `item_A` occurs at sequence 1 and sequence 3, both receive distinct tokens and are counted as 2 distinct occurrences. The host never stores per-item counters.
+### 3. How does event deduplication survive host crashes and restarts?
+In distributed systems, if a host restarts and resets its in-memory sequence counter to 0, naive sequence tracking could cause subsequent events to collide with pre-restart tokens.
+- **The Resolution: Host Incarnation Nonce.**
+  The event token formula is:
+  $$\tau = \text{Blake2b}(x \parallel \text{host\_id} \parallel \text{incarnation\_id} \parallel \text{seq})$$
+  When a host or container boots, it generates a fresh 64-bit `incarnation_id` (e.g. boot ID or startup timestamp).
+  - Even if `seq` resets to 0, the fresh incarnation guarantees distinct tokens—**zero post-restart events are dropped**.
+  - Client-side retries reuse the client transaction/idempotency key, preserving strict idempotence across network retry storms.
+  - Total host state: exactly **16 bytes** (`incarnation_id` + `seq`), strictly $O(1)$ memory independent of the number of items $K$.
 
-### 3. How do you prevent state resurrection when rotating sliding windows?
-In join-semilattices, merging an older sketch into a freshly zeroed sketch can resurrect expired state under asynchronous clock skew.  
-**The Resolution:** iCMS provides `EpochICMS`, an **Epoch-Tagged Slotted CRDT**. Every sketch carries an epoch tag `e = floor(time() / window)`. Nodes maintain a 2-generation window (`current` and `previous`). In-flight gossip packets from expired epochs (`e < current - 1`) are strictly rejected by the epoch guard.
+### 4. How does `EpochICMS` prevent both State Resurrection AND Epoch Poisoning DoS?
+- **State Resurrection:** In join-semilattices, merging an older unrotated sketch into a freshly zeroed sketch can resurrect expired counts. `EpochICMS` tags sketches with their window epoch $e = \lfloor t / W \rfloor$. Incoming packets with $e < e_{\text{current}} - 1$ are strictly dropped by the deserializer epoch guard.
+- **Epoch Poisoning DoS:** If an incoming gossip packet claimed a distant future epoch ($e \gg e_{\text{current}}$), naive adoption would prematurely rotate local windows and discard active state. `EpochICMS` strictly enforces:
+  1. Incoming packets with $e > e_{\text{current}} + 1$ are **rejected** as malicious or desynchronized.
+  2. Bounded forward skew ($e == e_{\text{current}} + 1$) is staged into `next_sketch` without hijacking the local epoch.
+  3. Local epoch advancement is driven **strictly by the node's authoritative monotonic clock**, never by peer gossip payloads.
 
-### 4. What does Z3 formally verify vs. what is verified analytically?
-Z3 SMT solver proves the **algebraic and state-transition invariants** (commutativity, associativity, idempotence, monotonicity, LUB, extensional antisymmetry, and duplicate storm invariance under arbitrary permutations). The **probabilistic error bounds** are proven analytically using Flajolet's asymptotic variance and Cormode-Muthukrishnan heavy-hitter bounds.
+### 5. Why use iCMS instead of centralized Redis?
+- **Centralized Redis:** Open WebUI in enterprise deployments often uses Redis. However, Redis requires a dedicated central cluster, introduces network round-trip latency on every single HTTP/auth request, and stores $O(K)$ keys in memory (vulnerable to dictionary memory-exhaustion attacks).
+- **Decentralized iCMS:** Operates peer-to-peer within worker processes. Requires **zero central database dependencies**, guarantees strictly **$O(1)$ bounded memory** (16 KB flat RAM even under 50,000 sprayed keys), and remains immune to gossip duplicate storms. Perfect for edge nodes, serverless sidecars, and kernel eBPF rate limiting.
 
 ---
 

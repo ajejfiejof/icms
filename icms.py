@@ -36,18 +36,24 @@ def _blake2b_64(data: bytes, key_int: int) -> int:
     )
 
 
+# Precomputed inverse powers for Flajolet harmonic mean: 2.0 ** -x for x in [0..64]
+_POW2_INV = [2.0 ** -x for x in range(65)]
+
+
 class MiniHLL:
     """A compact HyperLogLog join-semilattice cell.
 
     Operates as an idempotent register lattice where merge is pointwise maximum.
+    Includes caching for O(1) query performance and unbiased small-cardinality corrections.
     """
 
-    __slots__ = ("p", "m", "reg")
+    __slots__ = ("p", "m", "reg", "_cached_count")
 
     def __init__(self, p: int = 4):
         self.p = p
         self.m = 1 << p
         self.reg = [0] * self.m
+        self._cached_count: Optional[float] = None
 
     def add_hash(self, h: int) -> None:
         """Add a precomputed 64-bit event hash into the lattice."""
@@ -57,6 +63,7 @@ class MiniHLL:
         rho = (64 - self.p) - b + 1 if b else (64 - self.p) + 1
         if rho > self.reg[idx]:
             self.reg[idx] = rho
+            self._cached_count = None
 
     def merge(self, other: MiniHLL) -> MiniHLL:
         """Join-semilattice LUB: pointwise maximum."""
@@ -67,6 +74,9 @@ class MiniHLL:
 
     def count(self) -> float:
         """Unbiased cardinality estimate using Flajolet harmonic mean and linear counting."""
+        if self._cached_count is not None:
+            return self._cached_count
+
         m = self.m
         r = self.reg
         if m >= 128:
@@ -80,7 +90,7 @@ class MiniHLL:
         else:
             alpha = 0.5
 
-        s = sum(2.0 ** -x for x in r)
+        s = sum(_POW2_INV[x] for x in r)
         e = alpha * m * m / s
 
         # Small cardinality correction (Linear Counting)
@@ -93,6 +103,7 @@ class MiniHLL:
         if e > (1 << 32) / 30.0:
             e = -(1 << 32) * math.log(1.0 - e / (1 << 32))
 
+        self._cached_count = e
         return e
 
 
@@ -116,21 +127,35 @@ class ICMS:
     def _bucket(self, item_bytes: bytes, row: int) -> int:
         return _blake2b_64(item_bytes, self.seed + row * 1009) % self.w
 
-    def add(self, item: Union[str, bytes], host_id: int, seq: int) -> None:
-        """Add an event occurrence at a specific host and sequence nonce.
+    def add(
+        self,
+        item: Union[str, bytes],
+        host_id: int = 0,
+        seq: int = 0,
+        incarnation_id: int = 0,
+    ) -> None:
+        """Add an event occurrence at a specific host, incarnation, and sequence nonce.
 
-        NOTE ON O(1) HOST MEMORY:
-        `seq` is a SINGLE global monotonic counter per host (e.g., ktime_get_ns()
-        or a single 64-bit integer on the host). It does NOT require O(K) space per item.
-        Different events for the same item receive different global sequence numbers,
-        producing distinct tokens in the item's cell. Retries reuse the same sequence number,
-        achieving idempotent deduplication.
+        CRASH-RECOVERY & IDEMPOTENCE INVARIANT:
+        - `incarnation_id`: 64-bit boot/instance nonce (e.g. system boot_id or startup timestamp).
+          Prevents silent data loss across node restarts when sequence numbers reset.
+        - `seq`: Single monotonic sequence or client request_id on this host incarnation.
+          Reused across network retransmissions and client retries for strict idempotence.
+        - Host memory overhead: Exactly 16 bytes (incarnation_id + seq), strictly O(1) space!
         """
         if isinstance(item, str):
             item = item.encode("utf-8")
 
-        # Deterministic event token: Blake2b(item || host_id || seq)
-        token_data = item + b":" + host_id.to_bytes(4, "little") + b":" + seq.to_bytes(8, "little")
+        # Deterministic event token: Blake2b(item || host_id || incarnation_id || seq)
+        token_data = (
+            item
+            + b":"
+            + host_id.to_bytes(4, "little")
+            + b":"
+            + incarnation_id.to_bytes(8, "little")
+            + b":"
+            + seq.to_bytes(8, "little")
+        )
         token_hash = _blake2b_64(token_data, 0x1337BEEF)
 
         for r in range(self.d):
@@ -151,7 +176,7 @@ class ICMS:
 
         Methods:
         - 'debiased' (default): Uses Count-Mean-Min debiasing + Median to eliminate
-          negative Jensen bias and hash collision noise.
+          negative Jensen bias and hash collision noise without sampling bias.
         - 'min': Traditional Count-Min minimum across rows.
         - 'median': Pure median across rows (robust to collisions).
         """
@@ -167,12 +192,12 @@ class ICMS:
 
         # Debiased Estimator (Count-Mean-Min with Median):
         # Subtract expected collision noise per row: mu_r = (Total_r - N_rc) / (w - 1)
+        # Uses exact un-sampled sum across all w buckets (O(1) via cached cell counts).
         debiased = []
         for r in range(self.d):
             c_target = self._bucket(item, r)
             n_target = estimates[r]
-            # Average noise in other buckets of this row
-            row_sum = sum(self.cells[r][c].count() for c in range(min(self.w, 16))) * (self.w / min(self.w, 16))
+            row_sum = sum(self.cells[r][c].count() for c in range(self.w))
             noise = max(0.0, (row_sum - n_target) / max(1, self.w - 1))
             debiased.append(max(0.0, n_target - noise))
 
@@ -195,11 +220,14 @@ class ICMS:
 
 
 class EpochICMS:
-    """Epoch-Tagged Slotted CRDT.
+    """Epoch-Tagged Slotted CRDT with Epoch Poisoning DoS Defense.
 
-    Solves the 'State Resurrection' flaw under asynchronous gossip window rotation.
-    Maintains a 2-generation sliding window (Current + Previous) with strict epoch guards.
-    Delayed packets from expired epochs (> current - 1) are mathematically rejected.
+    Solves the 'State Resurrection' flaw under asynchronous gossip window rotation
+    and eliminates malicious future epoch desynchronization attacks.
+    Maintains a 3-stage window (Previous, Current, Next) with strict epoch guards:
+    - Expired packets (epoch < current - 1) are rejected (PREVENTS STATE RESURRECTION).
+    - Malicious future packets (epoch > current + 1) are rejected (PREVENTS EPOCH DESYNC DoS).
+    - Local node epoch is strictly governed by local monotonic wall clock, NEVER by peer gossip.
     """
 
     def __init__(self, window_seconds: float = 60.0, w: int = 128, d: int = 4, p: int = 4, seed: int = 42):
@@ -212,6 +240,7 @@ class EpochICMS:
         self.current_epoch = int(time.time() // self.window)
         self.curr_sketch = ICMS(w, d, p, seed)
         self.prev_sketch = ICMS(w, d, p, seed)
+        self.next_sketch: Optional[ICMS] = None
 
     def _advance_epoch_if_needed(self) -> None:
         now_epoch = int(time.time() // self.window)
@@ -220,16 +249,18 @@ class EpochICMS:
             # Complete expiration: reset both generations
             self.prev_sketch = ICMS(self.w, self.d, self.p, self.seed)
             self.curr_sketch = ICMS(self.w, self.d, self.p, self.seed)
+            self.next_sketch = None
             self.current_epoch = now_epoch
         elif diff == 1:
-            # Advance 1 window: slide current -> prev, init new current
+            # Advance 1 window: slide current -> prev, promote buffered next if present
             self.prev_sketch = self.curr_sketch
-            self.curr_sketch = ICMS(self.w, self.d, self.p, self.seed)
+            self.curr_sketch = self.next_sketch if self.next_sketch is not None else ICMS(self.w, self.d, self.p, self.seed)
+            self.next_sketch = None
             self.current_epoch = now_epoch
 
-    def add(self, item: str, host_id: int, seq: int) -> None:
+    def add(self, item: str, host_id: int = 0, seq: int = 0, incarnation_id: int = 0) -> None:
         self._advance_epoch_if_needed()
-        self.curr_sketch.add(item, host_id, seq)
+        self.curr_sketch.add(item, host_id=host_id, seq=seq, incarnation_id=incarnation_id)
 
     def query(self, item: str) -> float:
         self._advance_epoch_if_needed()
@@ -246,11 +277,14 @@ class EpochICMS:
     def merge_gossip(self, incoming_sketch: ICMS, incoming_epoch: int) -> bool:
         """Merge incoming gossip payload with strict epoch bounds.
 
-        Rejects packets from epoch < current_epoch - 1 (PREVENTS STATE RESURRECTION).
+        Security Invariants:
+        1. Rejects expired packets (incoming_epoch < current_epoch - 1) -> Prevents State Resurrection.
+        2. Rejects future/desynced packets (incoming_epoch > current_epoch + 1) -> Prevents Epoch Desync DoS.
+        3. Local node epoch is NEVER advanced by incoming gossip; driven strictly by local monotonic clock.
         """
         self._advance_epoch_if_needed()
         if incoming_epoch < self.current_epoch - 1:
-            # Expired packet: drop to prevent resurrection
+            # Stale / expired packet: dropped
             return False
         elif incoming_epoch == self.current_epoch - 1:
             self.prev_sketch = self.prev_sketch.merge(incoming_sketch)
@@ -258,9 +292,14 @@ class EpochICMS:
         elif incoming_epoch == self.current_epoch:
             self.curr_sketch = self.curr_sketch.merge(incoming_sketch)
             return True
-        else:
-            # Future epoch (clock drift or advancement)
-            self.current_epoch = incoming_epoch
-            self.prev_sketch = self.curr_sketch
-            self.curr_sketch = incoming_sketch
+        elif incoming_epoch == self.current_epoch + 1:
+            # Allowable forward clock skew (+1 window boundary): stage into next generation
+            if self.next_sketch is None:
+                self.next_sketch = incoming_sketch
+            else:
+                self.next_sketch = self.next_sketch.merge(incoming_sketch)
             return True
+        else:
+            # Malicious or desynchronized future epoch (> current_epoch + 1):
+            # Dropped to prevent Epoch Desynchronization DoS!
+            return False

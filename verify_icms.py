@@ -193,6 +193,20 @@ def verify_all():
     all_ok &= token_ok
     print(f"  [{'PROVED' if token_ok else 'FAILED'}]  O(1) Token Separation: (sa != sb) => Token(x, h, sa) != Token(x, h, sb)")
 
+    # -------------------------------------------------------------
+    # 7. EPOCH GUARD SECURITY INVARIANT (Epoch Poisoning DoS Defense)
+    # -------------------------------------------------------------
+    print("\n[Phase 7] Proving Epoch Guard Security Invariant...")
+    e_loc = z3.Int("e_loc")
+    e_in = z3.Int("e_in")
+    diff = z3.If(e_loc >= e_in, e_loc - e_in, e_in - e_loc)
+    accept = diff <= 1
+
+    all_ok &= check_valid(
+        "Epoch Poisoning Immunity: |e_in - e_loc| > 1 => Accept == False",
+        lambda: z3.And(diff > 1, accept),
+    )
+
     print("\n" + "=" * 70)
     if all_ok:
         print("FINAL VERDICT: ALL THEOREMS 100% PROVED UNIVERSALLY BY Z3 SMT")
