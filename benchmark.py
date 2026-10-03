@@ -146,7 +146,7 @@ def run_benchmark():
     sketches_sum = [CMSSum(w, d) for _ in range(num_hosts)]
     sketches_max = [CMSMax(w, d) for _ in range(num_hosts)]
     sketches_gc = [CMSGcounter(num_hosts, w, d) for _ in range(num_hosts)]
-    sketches_icms = [ICMS(w, d, p=4) for _ in range(num_hosts)]
+    sketches_icms = [ICMS(w, d, p=8) for _ in range(num_hosts)]
 
     for h in range(num_hosts):
         for item, seq in host_events[h]:
@@ -178,7 +178,7 @@ def run_benchmark():
         agg_sum = CMSSum(w, d)
         agg_max = CMSMax(w, d)
         agg_gc = CMSGcounter(num_hosts, w, d)
-        agg_icms = ICMS(w, d, p=4)
+        agg_icms = ICMS(w, d, p=8)
 
         for p_idx in packets:
             agg_sum = agg_sum.merge(sketches_sum[p_idx])
@@ -224,11 +224,12 @@ def run_benchmark():
     print(f"{'Replicas (R)':<15} | {'CMS (Sum)':<15} | {'CMS (G-Counter)':<18} | {'iCMS (Ours)'}")
     print("-" * 65)
     for r_scale in [10, 50, 200, 1000, 10000, 50000]:
-        mem_sum = 128 * 4 * 4 / 1024
-        mem_gc = 128 * 4 * r_scale * 4 / 1024
-        mem_icms = 128 * 4 * 16 / 1024
+        mem_sum = 1024 * 8 * 8 / 1024
+        mem_gc = 1024 * 8 * r_scale * 8 / 1024
+        mem_icms = 1024 * 8 * 256 / 1024
         gc_str = f"{mem_gc / 1024:.2f} MB" if mem_gc >= 1024 else f"{mem_gc:.1f} KB"
-        print(f"{r_scale:<15} | {mem_sum:<14.1f} KB | {gc_str:<18} | {mem_icms:.1f} KB (CONSTANT)")
+        icms_str = f"{mem_icms / 1024:.2f} MB" if mem_icms >= 1024 else f"{mem_icms:.1f} KB"
+        print(f"{r_scale:<15} | {mem_sum:<14.1f} KB | {gc_str:<18} | {icms_str} (CONSTANT)")
     print("=" * 80)
 
 

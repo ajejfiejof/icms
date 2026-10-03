@@ -117,7 +117,7 @@ class ICMS:
     - Debiased Median estimation (eliminates negative Jensen bias of raw min).
     """
 
-    def __init__(self, w: int = 128, d: int = 4, p: int = 4, seed: int = 42):
+    def __init__(self, w: int = 1024, d: int = 8, p: int = 8, seed: int = 42):
         self.w = w
         self.d = d
         self.p = p
